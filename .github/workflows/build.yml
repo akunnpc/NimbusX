@@ -35,25 +35,49 @@ jobs:
     - name: Set up Android SDK
       uses: android-actions/setup-android@v3
 
+    - name: Accept Android SDK licenses
+      run: yes | sdkmanager --licenses
+
     # Project ini pakai compileSdk 36, jadi platform & build-tools wajib versi terbaru
     - name: Install latest SDK platform & build-tools
       run: |
         sdkmanager --install "platforms;android-36" "build-tools;36.0.0"
 
-    - name: Set up Gradle
+    - name: Set up Gradle (pin version)
       uses: gradle/actions/setup-gradle@v4
+      with:
+        gradle-version: '9.6.1'
 
     # Zip ini TIDAK menyertakan gradlew, jadi wrapper harus di-generate.
-    # AGP-nya 9.1.1 & Kotlin 2.2.10, jadi pakai Gradle yang compatible (9.x).
+    # AGP-nya 9.1.1 & Kotlin 2.2.10, jadi pakai Gradle 9.6.1 (compatible)
     - name: Generate Gradle wrapper if missing
       run: |
         if [ ! -f gradlew ]; then
-          echo "gradlew tidak ditemukan, generate wrapper otomatis..."
-          gradle wrapper --gradle-version 9.3.1
+          echo "gradlew not found — generating wrapper (Gradle 9.6.1)..."
+          gradle wrapper --gradle-version 9.6.1
+        else
+          echo "gradlew already present in repo"
         fi
 
     - name: Make gradlew executable
-      run: chmod +x gradlew
+      run: chmod +x gradlew || true
+
+    - name: Diagnostic: Java & Gradle
+      run: |
+        echo "=== java -version ==="
+        java -version || true
+        echo "=== gradle --version (system) ==="
+        gradle --version || true
+        if [ -f gradlew ]; then
+          echo "=== ./gradlew --version (wrapper) ==="
+          ./gradlew --version || true
+          echo "=== gradle/wrapper/gradle-wrapper.properties ==="
+          sed -n '1,200p' gradle/wrapper/gradle-wrapper.properties || true
+        else
+          echo "No gradlew in repo"
+        fi
+        echo "=== Workspace listing ==="
+        ls -la
 
     # Secrets Gradle Plugin butuh .env, fallback ke .env.example biar GEMINI_API_KEY placeholder ke-cover
     - name: Create .env from example (if missing)
@@ -76,11 +100,37 @@ jobs:
           -noprompt
 
     - name: Build debug APK
-      run: ./gradlew assembleDebug --stacktrace
+      run: |
+        if [ -f ./gradlew ]; then
+          ./gradlew assembleDebug --no-daemon --stacktrace --info 2>&1 | tee build-output.log
+        else
+          gradle assembleDebug --no-daemon --stacktrace --info 2>&1 | tee build-output.log
+        fi
+
+    - name: Upload build log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-output-log
+        path: build-output.log
+        retention-days: 7
 
     # includeAndroidResources = true (buat Roborazzi/Robolectric), jadi unit test butuh resources di-resolve dulu
     - name: Run unit tests
-      run: ./gradlew testDebugUnitTest --stacktrace
+      run: |
+        if [ -f ./gradlew ]; then
+          ./gradlew testDebugUnitTest --no-daemon --stacktrace --info 2>&1 | tee test-output.log
+        else
+          gradle testDebugUnitTest --no-daemon --stacktrace --info 2>&1 | tee test-output.log
+        fi
+
+    - name: Upload test log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-output-log
+        path: test-output.log
+        retention-days: 7
 
     - name: Upload test reports
       if: always()
@@ -115,22 +165,29 @@ jobs:
     - name: Set up Android SDK
       uses: android-actions/setup-android@v3
 
+    - name: Accept Android SDK licenses
+      run: yes | sdkmanager --licenses
+
     - name: Install latest SDK platform & build-tools
       run: |
         sdkmanager --install "platforms;android-36" "build-tools;36.0.0"
 
-    - name: Set up Gradle
+    - name: Set up Gradle (pin version)
       uses: gradle/actions/setup-gradle@v4
+      with:
+        gradle-version: '9.6.1'
 
     - name: Generate Gradle wrapper if missing
       run: |
         if [ ! -f gradlew ]; then
-          echo "gradlew tidak ditemukan, generate wrapper otomatis..."
-          gradle wrapper --gradle-version 9.3.1
+          echo "gradlew not found — generating wrapper (Gradle 9.6.1)..."
+          gradle wrapper --gradle-version 9.6.1
+        else
+          echo "gradlew already present in repo"
         fi
 
     - name: Make gradlew executable
-      run: chmod +x gradlew
+      run: chmod +x gradlew || true
 
     - name: Create .env from example (if missing)
       run: |
@@ -148,7 +205,20 @@ jobs:
           -noprompt
 
     - name: Run Android Lint
-      run: ./gradlew lintDebug --stacktrace
+      run: |
+        if [ -f ./gradlew ]; then
+          ./gradlew lintDebug --no-daemon --stacktrace --info 2>&1 | tee lint-output.log
+        else
+          gradle lintDebug --no-daemon --stacktrace --info 2>&1 | tee lint-output.log
+        fi
+
+    - name: Upload lint log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: lint-output-log
+        path: lint-output.log
+        retention-days: 7
 
     - name: Upload lint report
       if: always()
@@ -157,4 +227,3 @@ jobs:
         name: lint-report
         path: app/build/reports/lint-results-debug.html
         retention-days: 30
-        
