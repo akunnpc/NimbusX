@@ -1,204 +1,113 @@
-name: Build & Test Android Project
+name: Android CI
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main, develop]
   pull_request:
-    branches: [ main, develop ]
+    branches: [main, develop]
   workflow_dispatch:
 
-env:
-  GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -Dorg.gradle.parallel=true"
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
-    name: Build with Gradle
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-
-    permissions:
-      contents: read
-      checks: write
-      pull-requests: write
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-
-    - name: Set up JDK 21
-      uses: actions/setup-java@v4
-      with:
-        java-version: '21'
-        distribution: 'temurin'
-
-    - name: Set up Android SDK
-      uses: android-actions/setup-android@v3
-
-    - name: Accept Android SDK licenses
-      run: yes | sdkmanager --licenses
-
-    - name: Install SDK platform & build-tools
-      run: sdkmanager --install "platforms;android-36" "build-tools;36.0.0"
-
-    - name: Set up Gradle (pin version)
-      uses: gradle/actions/setup-gradle@v4
-      with:
-        gradle-version: '9.6.1'
-
-    - name: Generate Gradle wrapper if missing
-      run: |
-        if [ ! -f gradlew ]; then
-          echo "gradlew not found — generating wrapper (Gradle 9.6.1)..."
-          gradle wrapper --gradle-version 9.6.1
-        else
-          echo "gradlew already present"
-        fi
-
-    - name: Make gradlew executable
-      run: chmod +x gradlew || true
-
-    - name: Diagnostic: Java & Gradle
-      run: |
-        java -version || true
-        gradle --version || true
-        if [ -f ./gradlew ]; then ./gradlew --version || true; fi
-        echo "Listing workspace root:"
-        ls -la
-
-    - name: Create .env from example (if missing)
-      run: |
-        if [ ! -f .env ] && [ -f .env.example ]; then
-          cp .env.example .env
-        fi
-
-    - name: Generate debug keystore
-      run: |
-        keytool -genkey -v -keystore debug.keystore \
-          -keyalg RSA -keysize 2048 -validity 10000 \
-          -alias androiddebugkey -keypass android \
-          -storepass android \
-          -dname "CN=Android Debug,O=Android,C=US" \
-          -noprompt
-
-    - name: Build debug APK (capture log)
-      run: |
-        set -o pipefail
-        if [ -f ./gradlew ]; then
-          ./gradlew assembleDebug --no-daemon --stacktrace --info 2>&1 | tee build-output.log
-        else
-          gradle assembleDebug --no-daemon --stacktrace --info 2>&1 | tee build-output.log
-        fi
-
-    - name: Compress build log
-      if: always()
-      run: zip -q build-output.zip build-output.log || true
-
-    - name: Upload build log
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: build-output
-        path: build-output.zip
-        retention-days: 7
-
-    - name: Run unit tests (capture log)
-      run: |
-        set -o pipefail
-        if [ -f ./gradlew ]; then
-          ./gradlew testDebugUnitTest --no-daemon --stacktrace --info 2>&1 | tee test-output.log
-        else
-          gradle testDebugUnitTest --no-daemon --stacktrace --info 2>&1 | tee test-output.log
-        fi
-
-    - name: Compress test logs & reports
-      if: always()
-      run: |
-        zip -q test-output.zip test-output.log || true
-        if [ -d app/build/reports ]; then
-          zip -rq test-reports.zip app/build/reports || true
-        fi
-
-    - name: Upload test artifacts
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: test-artifacts
-        path: |
-          test-output.zip
-          test-reports.zip
-        retention-days: 7
-
-    - name: Upload debug APK
-      if: success()
-      uses: actions/upload-artifact@v4
-      with:
-        name: debug-apk
-        path: app/build/outputs/apk/debug/*.apk
-        retention-days: 7
-
-  lint:
-    name: Lint Check
+    name: Build, Test & Lint
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    permissions:
+      contents: read
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Set up JDK 21
-      uses: actions/setup-java@v4
-      with:
-        java-version: '21'
-        distribution: 'temurin'
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
 
-    - name: Set up Android SDK
-      uses: android-actions/setup-android@v3
+      # AGP 9.1.1 di project ini butuh cmdline-tools yang cukup baru buat resolve
+      # compileSdk 36, jadi kita install manual daripada andelin default image.
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
 
-    - name: Accept Android SDK licenses
-      run: yes | sdkmanager --licenses
+      - name: Install SDK platform 36 & build-tools
+        run: sdkmanager --install "platforms;android-36" "build-tools;36.0.0"
 
-    - name: Install SDK platform & build-tools
-      run: sdkmanager --install "platforms;android-36" "build-tools;36.0.0"
+      # setup-gradle sudah handle caching (wrapper, dependencies, build cache)
+      # otomatis, jadi gak perlu actions/cache manual.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
-    - name: Set up Gradle (pin version)
-      uses: gradle/actions/setup-gradle@v4
-      with:
-        gradle-version: '9.6.1'
+      # Zip/export project ini gak menyertakan gradlew, jadi kita generate sendiri.
+      # Dipin ke versi yang cocok sama AGP 9.1.1 + Kotlin 2.2.10.
+      - name: Ensure Gradle wrapper exists
+        run: |
+          if [ ! -f ./gradlew ]; then
+            gradle wrapper --gradle-version 9.3.1
+          fi
+          chmod +x ./gradlew
 
-    - name: Generate Gradle wrapper if missing
-      run: |
-        if [ ! -f gradlew ]; then
-          gradle wrapper --gradle-version 9.6.1
-        fi
+      # Secrets Gradle Plugin wajib nemu file .env, kalau gak ada, build gagal
+      # saat baca GEMINI_API_KEY. .env.example dipakai sebagai fallback aman.
+      - name: Set up local env file
+        run: |
+          if [ ! -f .env ]; then
+            cp .env.example .env
+          fi
 
-    - name: Make gradlew executable
-      run: chmod +x gradlew || true
+      # google-services plugin sudah di-set missingGoogleServicesStrategy = WARN
+      # di app/build.gradle.kts, jadi gak perlu bikin google-services.json dummy.
+      # Kalau nanti mau dipakai beneran, taruh via GitHub Secret + decode base64 di sini.
 
-    - name: Run Android Lint (capture log)
-      run: |
-        set -o pipefail
-        if [ -f ./gradlew ]; then
-          ./gradlew lintDebug --no-daemon --stacktrace --info 2>&1 | tee lint-output.log
-        else
-          gradle lintDebug --no-daemon --stacktrace --info 2>&1 | tee lint-output.log
-        fi
+      - name: Generate debug keystore
+        run: |
+          keytool -genkeypair -v \
+            -keystore debug.keystore \
+            -storetype JKS \
+            -alias androiddebugkey \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass android -keypass android \
+            -dname "CN=Android Debug,O=Android,C=US"
 
-    - name: Compress lint logs & report
-      if: always()
-      run: |
-        zip -q lint-output.zip lint-output.log || true
-        if [ -f app/build/reports/lint-results-debug.html ]; then
-          zip -q lint-report.zip app/build/reports/lint-results-debug.html || true
-        fi
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --stacktrace
 
-    - name: Upload lint artifacts
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: lint-artifacts
-        path: |
-          lint-output.zip
-          lint-report.zip
-        retention-days: 7
+      - name: Run unit tests
+        run: ./gradlew testDebugUnitTest --stacktrace
+
+      - name: Run Android Lint
+        run: ./gradlew lintDebug --stacktrace
+
+      - name: Upload debug APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: app/build/reports/tests/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Upload lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-report
+          path: app/build/reports/lint-results-debug.html
+          retention-days: 14
+          if-no-files-found: ignore
